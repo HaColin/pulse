@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitTry, openRepo, whoami } from '../src/git.js';
+import { clearLive, markLive, readLive, requestStop, stopRequested } from '../src/live.js';
 import { serveDashboard } from '../src/server.js';
 import { captureChanges, clearSnapshots, commitSnapshot, pushSnapshot, signOff } from '../src/snapshot.js';
 import { describe, findClaude, plainHeadline } from '../src/summarize.js';
@@ -15,7 +17,10 @@ Usage: pulse <command> [options]      (run inside your clone of the shared repo)
 Commands
   start            Snapshot your work every minute, push it, and show the team feed + dashboard
   watch            Only follow the team (feed + dashboard); publishes nothing
-  status           Print what everyone is doing right now, then exit
+  stop             Sign off the "pulse start" running in this clone
+  status           Print what everyone is doing right now, then exit (--json for raw data)
+  install-skill    Add the /team command to Claude Code (--as <name> to call it something else)
+  uninstall-skill  Remove it
   install-hook     Tell your Claude Code sessions in this repo what teammates are doing
   uninstall-hook   Remove that hook
   clear            Delete your snapshots from this clone and from the remote
@@ -33,7 +38,7 @@ Options
 `;
 
 const REFRESH_MS = 20_000;
-const VALUE_FLAGS = new Set(['interval', 'name', 'model', 'port', 'remote']);
+const VALUE_FLAGS = new Set(['interval', 'name', 'model', 'port', 'remote', 'as']);
 
 const color = process.stdout.isTTY && !process.env.NO_COLOR;
 const paint = (code) => (text) => (color ? `\x1b[${code}m${text}\x1b[0m` : text);
@@ -68,6 +73,8 @@ function feed(who, text, notes = []) {
   console.log(`${dim(stamp)}  ${bold(who.padEnd(16))} ${text}${extra.length ? dim(`  · ${extra.join(' · ')}`) : ''}`);
 }
 const aside = (text) => console.log(`${' '.repeat(7)}${text}`);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const dashboardUrl = (running) => (running?.port ? `http://localhost:${running.port}` : null);
 
 async function open(flags) {
   const repo = await openRepo(flags.dir ?? process.cwd());
@@ -79,6 +86,11 @@ async function open(flags) {
 
 async function live(flags, { publish }) {
   const { repo, me, remote, online } = await open(flags);
+  const already = publish && readLive(repo);
+  if (already) {
+    const where = dashboardUrl(already);
+    return console.log(`pulse is already sharing this clone${where ? ` (dashboard ${where})` : ''}. Stop it with "pulse stop".`);
+  }
   const intervalSeconds = Math.max(10, Number(flags.interval) || 60);
   const claude = publish && flags.ai !== false ? await findClaude() : null;
   const session = { started: false, head: null, seen: new Map(), warned: new Set() };
@@ -168,25 +180,32 @@ async function live(flags, { publish }) {
     console.log();
   }
 
+  const daemon = publish && !flags.once;
+  const beat = () => daemon && markLive(repo, { port: web?.port ?? null });
+  if (daemon) clearLive(repo);
+
   let stopping = false;
-  let wake = () => {};
-  const nap = (ms) => new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    wake = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-  });
-  const stop = () => {
-    if (stopping) process.exit(130);
-    stopping = true;
-    wake();
+  const nap = async (ms) => {
+    const until = Date.now() + ms;
+    while (!stopping && Date.now() < until) {
+      if (daemon && stopRequested(repo)) stopping = true;
+      else await sleep(Math.min(1000, until - Date.now()));
+    }
   };
-  process.on('SIGINT', stop);
-  process.on('SIGTERM', stop);
+  const interrupt = () => {
+    // A second Ctrl+C skips the sign-off and leaves at once.
+    if (stopping) {
+      if (daemon) clearLive(repo);
+      process.exit(130);
+    }
+    stopping = true;
+  };
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', interrupt);
 
   let nextSnapshot = 0;
   while (!stopping) {
+    beat();
     if (publish && Date.now() >= nextSnapshot) {
       nextSnapshot = Date.now() + intervalSeconds * 1000;
       await guarded('snapshot', snapshot);
@@ -202,6 +221,7 @@ async function live(flags, { publish }) {
     });
     console.log(dim('\nsigned off'));
   }
+  if (daemon) clearLive(repo);
   web?.server.close();
   web?.server.closeAllConnections?.();
 }
@@ -213,7 +233,14 @@ async function status(flags) {
     if (!fetched.ok) console.log(yellow(`! could not fetch from ${remote}, showing what this clone last saw: ${firstLine(fetched.err)}`));
   }
   const team = await readTeam(repo, me);
-  if (!team.people.length) return console.log('No one has shared a snapshot yet. Run "pulse start" to be the first.');
+  const running = readLive(repo);
+  if (flags.json) {
+    return console.log(JSON.stringify({ repo: repo.name, me: me.slug, sharing: Boolean(running), dashboard: dashboardUrl(running), ...team }, null, 2));
+  }
+  console.log(running
+    ? dim(`pulse is sharing this clone${running.port ? ` · dashboard ${dashboardUrl(running)}` : ''}`)
+    : yellow('! pulse is not running in this clone, so teammates cannot see your work. Start it with: pulse start'));
+  if (!team.people.length) return console.log('No one has shared a snapshot yet.');
   const dot = { active: green('●'), idle: yellow('●'), offline: dim('○') };
   for (const person of team.people) {
     const facts = [person.status, ago(person.ts, team.now), person.branch].filter(Boolean).join(' · ');
@@ -287,6 +314,40 @@ async function setHook(flags, { install }) {
     : `Hook removed from ${file}`);
 }
 
+async function stop(flags) {
+  const { repo } = await open(flags);
+  if (!readLive(repo)) return console.log('pulse is not running in this clone.');
+  requestStop(repo);
+  // It may be in the middle of a snapshot (a Claude call plus a push), so give it time to finish and sign off.
+  for (let waited = 0; waited < 100 && readLive(repo); waited++) await sleep(1000);
+  console.log(readLive(repo)
+    ? 'pulse has not stopped yet; it is probably finishing a snapshot. Check "pulse status" in a moment.'
+    : 'Signed off. Teammates now see you as offline.');
+}
+
+// Installs the /team skill for Claude Code. The template names the pulse command as a placeholder,
+// which is filled in with this copy's path so the skill works whether or not pulse is on PATH.
+async function setSkill(flags, { install }) {
+  const name = typeof flags.as === 'string' ? flags.as.toLowerCase().replace(/[^a-z0-9-]+/g, '-') : 'team';
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'skills', name);
+  const target = path.join(dir, 'SKILL.md');
+  const marker = '<!-- installed by pulse';
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
+  if (existing && !existing.includes(marker) && !flags.force) {
+    throw new Error(`${target} is a different skill, so it was left alone. Pick another name with --as <name>, or pass --force.`);
+  }
+  if (!install) {
+    if (existing) fs.rmSync(dir, { recursive: true, force: true });
+    return console.log(existing ? `Removed the /${name} skill.` : `There is no /${name} skill installed.`);
+  }
+  const command = `node "${fileURLToPath(import.meta.url).replace(/\\/g, '/')}"`;
+  const template = fs.readFileSync(new URL('../skill/SKILL.md', import.meta.url), 'utf8');
+  const skill = template.replaceAll('{{PULSE}}', command).replaceAll('{{NAME}}', name).trimEnd();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(target, `${skill}\n\n${marker}; run "pulse install-skill" again after moving or updating pulse -->\n`);
+  console.log(`Installed the /${name} skill in ${target}\nStart a new Claude Code session and type /${name}.`);
+}
+
 async function clear(flags) {
   const { repo, me, remote, online } = await open(flags);
   const result = await clearSnapshots(repo, me, online ? remote : null);
@@ -299,7 +360,10 @@ const command = flags._[0] ?? 'help';
 const commands = {
   start: () => live(flags, { publish: true }),
   watch: () => live(flags, { publish: false }),
+  stop: () => stop(flags),
   status: () => status(flags),
+  'install-skill': () => setSkill(flags, { install: true }),
+  'uninstall-skill': () => setSkill(flags, { install: false }),
   hook: () => hook(flags),
   'install-hook': () => setHook(flags, { install: true }),
   'uninstall-hook': () => setHook(flags, { install: false }),

@@ -26,13 +26,33 @@ pulse start
 
 The dashboard is at http://localhost:4747. Press Ctrl+C to sign off.
 
+## From Claude Code: `/team`
+
+```bash
+pulse install-skill
+```
+
+That adds a `/team` command to Claude Code (start a new session to pick it up). Inside your clone of the project:
+
+| You type | Claude does |
+|---|---|
+| `/team` | Tells you what everyone is doing and flags files you and a teammate are both changing |
+| `/team is anyone in the auth code?` | Answers from the live data, reading a teammate's actual work-in-progress when it needs to |
+| `/team start` | Starts sharing your work and installs the hook below |
+| `/team stop` | Signs you off |
+| `/team dashboard` | Opens the dashboard |
+
+You can also just ask ("who else is working on this?") and Claude will reach for it. Use `pulse install-skill --as <name>` if you would rather call it something other than `/team`.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `pulse start` | Snapshot + push every minute, show the feed and dashboard |
+| `pulse stop` | Sign off the `pulse start` running in this clone |
 | `pulse watch` | Feed and dashboard only; publishes nothing |
-| `pulse status` | Print what everyone is doing, then exit |
+| `pulse status` | Print what everyone is doing, then exit (`--json` for raw data) |
+| `pulse install-skill` | Add the `/team` command to Claude Code (`uninstall-skill` removes it) |
 | `pulse install-hook` | Tell your Claude Code sessions in this repo what teammates are doing |
 | `pulse uninstall-hook` | Remove that hook |
 | `pulse clear` | Delete your snapshots locally and on the remote |
