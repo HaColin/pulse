@@ -1,0 +1,17 @@
+{
+  "name": "pulse-team",
+  "version": "0.1.0",
+  "description": "Live team awareness for a shared git repo: everyone's work is snapshotted to GitHub every minute and Claude says what each person is doing.",
+  "type": "module",
+  "bin": {
+    "pulse": "bin/pulse.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
