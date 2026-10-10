@@ -65,7 +65,7 @@ const overlapLine = (team, overlap, meSlug) =>
 function feed(who, text, notes = []) {
   const stamp = new Date().toTimeString().slice(0, 5);
   const extra = notes.filter(Boolean);
-  console.log(`${dim(stamp)}  ${bold(who.padEnd(12))} ${text}${extra.length ? dim(`  · ${extra.join(' · ')}`) : ''}`);
+  console.log(`${dim(stamp)}  ${bold(who.padEnd(16))} ${text}${extra.length ? dim(`  · ${extra.join(' · ')}`) : ''}`);
 }
 const aside = (text) => console.log(`${' '.repeat(7)}${text}`);
 
